@@ -1,0 +1,635 @@
+---
+title: "Data-Driven Customer Segmentation and Trend Analysis"
+author: "Zenan Dong"
+Date: 2025-02-19
+format: 
+  html:
+    embed-resources: true
+  pdf: default
+editor: visual
+message: false
+warning: false  # 隐藏加载包的警告信息
+number-sections: true
+echo: false
+---
+
+# **Introduction**
+
+## **Project Overview**
+
+This project aims to analyze customer transaction data from an **online retail store**, using clustering techniques to segment customers and time-series analysis to understand sales trends. The insights derived will help businesses:
+
+-   **Identify high-value customers** who contribute the most revenue.
+
+-   **Distinguish occasional shoppers** from loyal customers.
+
+-   **Optimize marketing strategies** based on data-driven segmentation.
+
+## **Business Value**
+
+Effective customer segmentation and sales forecasting can:
+
+-   **Improve marketing ROI** by targeting the right customer groups.
+
+-   **Enhance customer retention** by identifying and engaging high-value customers.
+
+-   **Optimize inventory planning** by understanding sales trends over time.
+
+```{r}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(factoextra)
+library(dbscan)
+library(mclust)
+library(cluster)
+library(GGally)
+library(reshape2)
+library(plotly)
+library(manipulateWidget)
+library(htmlwidgets)
+library(jsonlite)
+```
+
+```{r}
+# 读取 Excel 文件
+file_path <- "D://online_retail_II.xlsx"  # 确保路径正确
+df <- read_excel(file_path, sheet = "Year 2010-2011")
+
+# 预览数据
+head(df)
+```
+
+# **Data Preprocessing**
+
+## **Dataset Overview**
+
+The dataset includes the following transaction details:
+
+-   **Invoice Number** – Unique identifier for each transaction.
+
+-   **StockCode & Description** – Product ID and product name.
+
+-   **Quantity & Price** – Number of items purchased and price per unit.
+
+-   **InvoiceDate** – Timestamp of the transaction.
+
+-   **Customer ID** – Unique identifier for each customer.
+
+-   **Country** – The country of purchase.
+
+## Data Cleaning
+
+To ensure the **quality and reliability** of our analysis, we perform the following preprocessing steps:
+
+✅ **Remove missing Customer IDs**
+
+-   Transactions without customer IDs are discarded as they cannot be associated with specific customer behavior.
+
+✅ **Filter out negative values**
+
+-   Transactions with negative quantities or prices (likely due to refunds or errors) are removed.
+
+✅ **Calculate total spending per transaction**
+
+$$ Total Spend=Quantity×Price $$
+
+✅ **Aggregate customer purchase behavior**
+
+-   **Total Revenue per Customer:** Sum of all purchases per customer.
+
+-   **Purchase Frequency:** Number of transactions per customer.
+
+-   **Recency:** Days since the last purchase.
+
+## **Data Cleaning Steps**
+
+-   **Removed missing Customer IDs**: Transactions without customer IDs were discarded.
+
+-   **Filtered out negative values**: Transactions with negative quantities or prices (likely returns) were removed.
+
+-   **Computed total spending per transaction**: `Total_Spend = Quantity × Price`.
+
+-   **Aggregated customer data**:
+
+    -   **Total Revenue per Customer**: Sum of all purchases.
+
+    -   **Purchase Frequency**: Number of transactions per customer.
+
+    -   **Recency**: Days since the last purchase.
+
+```{r}
+# 数据清理
+df_clean <- df %>%
+  filter(!is.na(`Customer ID`)) %>%
+  filter(Quantity > 0, Price > 0) %>%
+  mutate(Total_Spend = Quantity * Price)
+
+# 计算 RFM 指标
+customer_rfm <- df_clean %>%
+  group_by(`Customer ID`) %>%
+  summarise(
+    Recency = as.numeric(difftime(max(InvoiceDate), Sys.Date(), units = "days")),
+    Frequency = n(),
+    Monetary = sum(Total_Spend)
+  )
+head(customer_rfm)
+```
+
+💡 **Insight**:\
+These **RFM (Recency, Frequency, Monetary) features** provide a structured way to **differentiate customer groups** based on their spending behavior.
+
+# **Customer Segmentation Using Clustering**
+
+## Step 1: Standardizing the Data
+
+Since **Recency, Frequency, and Monetary** values have different scales, we **normalize the dataset** to ensure fair clustering.
+
+```{r}
+# 数据标准化
+customer_rfm_scaled <- scale(customer_rfm[, -1])
+```
+
+## Step 2: Applying Clustering Algorithms
+
+We explore three clustering techniques to segment customers effectively:
+
+### **1️⃣ K-Means Clustering**
+
+-   Groups customers into **3 segments** based on RFM scores.
+
+-   Assigns each customer to the closest cluster centroid.
+
+```{r}
+# K-Means 聚类
+set.seed(123)
+kmeans_result <- kmeans(customer_rfm_scaled, centers = 3, nstart = 25)
+customer_rfm$Cluster_KMeans <- as.factor(kmeans_result$cluster)
+```
+
+✅ **Findings**:
+
+-   **Cluster 1:** High-value, frequent buyers.
+
+-   **Cluster 2:** Occasional buyers with medium spending.
+
+-   **Cluster 3:** Low-frequency, low-spending customers.
+
+### **2️⃣ DBSCAN (Density-Based Clustering)**
+
+-   Detects **natural groups of customers** based on purchase density.
+
+-   Identifies **outliers (noise customers)** who don’t belong to any cluster.
+
+```{r}
+# DBSCAN 聚类
+set.seed(123)
+dbscan_result <- dbscan(customer_rfm_scaled, eps = 1, minPts = 5)
+customer_rfm$Cluster_DBSCAN <- as.factor(dbscan_result$cluster)
+```
+
+✅ **Findings**:
+
+-   **DBSCAN captures natural customer clusters** without needing to predefine K.
+
+-   **Customers labeled as `-1` are outliers**, indicating irregular buying patterns.
+
+### **3️⃣ Gaussian Mixture Model (GMM)**
+
+-   Provides a **soft clustering approach**, meaning customers belong to multiple clusters with probabilities.
+
+-   Suitable for **complex distributions** where hard assignments (like K-Means) don’t work well.
+
+```{r}
+# GMM 聚类
+set.seed(123)
+gmm_result <- Mclust(customer_rfm_scaled)
+customer_rfm$Cluster_GMM <- as.factor(gmm_result$classification)
+```
+
+✅ **Findings**:
+
+-   GMM **avoids hard boundaries** and **assigns probability scores** to each cluster.
+
+-   Useful when customer behavior **overlaps between segments**.
+
+```{r}
+plot_cluster <- function(cluster_col) {
+  ggplotly(
+    ggplot(customer_rfm, aes_string(x = "Monetary", y = "Recency", color = cluster_col)) +
+      geom_point() +
+      labs(title = paste("Clustering Result -", cluster_col))
+  )
+}
+
+plot_data <- list(
+  "Cluster_KMeans" = plot_cluster("Cluster_KMeans")$x$data,
+  "Cluster_DBSCAN" = plot_cluster("Cluster_DBSCAN")$x$data,
+  "Cluster_GMM" = plot_cluster("Cluster_GMM")$x$data
+)
+
+htmltools::tagList(
+  htmltools::tags$label("Select Clustering Method:"),
+  htmltools::tags$select(id = "clusterDropdown",
+    htmltools::tags$option(value = "Cluster_KMeans", "K-Means"),
+    htmltools::tags$option(value = "Cluster_DBSCAN", "DBSCAN"),
+    htmltools::tags$option(value = "Cluster_GMM", "GMM")
+  ),
+  htmlwidgets::onRender(
+    plot_cluster("Cluster_KMeans"),
+    sprintf(
+      "function(el, x) {
+        var plotData = %s;
+        document.getElementById('clusterDropdown').addEventListener('change', function() {
+          var selected = this.value;
+          Plotly.react(el, plotData[selected]);
+        });
+      }",
+      jsonlite::toJSON(plot_data, auto_unbox = TRUE)
+    )
+  )
+)
+```
+
+## Step 3: Evaluating Cluster Performance
+
+To measure clustering effectiveness, we compute **silhouette scores**:
+
+```{r}
+library(cluster)
+sil_kmeans <- silhouette(kmeans_result$cluster, dist(customer_rfm_scaled))
+sil_dbscan <- silhouette(dbscan_result$cluster, dist(customer_rfm_scaled))
+sil_gmm <- silhouette(gmm_result$classification, dist(customer_rfm_scaled))
+
+silhouette_scores <- data.frame(
+  Method = c("K-Means", "DBSCAN", "GMM"),
+  Score = c(mean(sil_kmeans[, 3]), mean(sil_dbscan[, 3]), mean(sil_gmm[, 3]))
+)
+
+p2 <- ggplot(silhouette_scores, aes(x = Method, y = Score, fill = Method)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Silhouette Score Comparison")
+
+ggplotly(p2)
+```
+
+✅ **Findings**:
+
+-   A **higher silhouette score** indicates **better-defined clusters**.
+
+-   K-Means performs well, but **DBSCAN is more effective in identifying noise customers**.
+
+# RFM Heatmap Analysis
+
+The **RFM Heatmap** visually represents how **Recency, Frequency, and Monetary values** vary across different customer clusters identified by **K-Means clustering**.
+
+```{r}
+melted_rfm <- melt(customer_rfm[, c("Recency", "Frequency", "Monetary", "Cluster_KMeans")], id.vars = "Cluster_KMeans")
+
+p3 <- ggplot(melted_rfm, aes(x = variable, y = Cluster_KMeans, fill = value)) +
+  geom_tile() +
+  labs(title = "RFM Heatmap by Cluster") +
+  scale_fill_gradient(low = "blue", high = "red")
+
+ggplotly(p3)
+```
+
+## **Interpretation of the Heatmap**
+
+-   The **x-axis** represents the **RFM metrics** (**Recency, Frequency, and Monetary**).
+
+-   The **y-axis** represents different **customer clusters** as identified by **K-Means**.
+
+-   The **color gradient (from blue to red)** indicates **low to high values** for each RFM metric within each cluster.
+
+## 💡 **Key Insights from the Heatmap:**
+
+1.  **Monetary (M) & Frequency (F) are strongly correlated for high-value customers**
+
+    -   The cluster with the **highest monetary spending (red color)** is also the one with **high frequency**, indicating loyal, high-spending customers.
+
+2.  **Recency (R) is higher (blue) for inactive or lost customers**
+
+    -   If a cluster shows a **high recency (blue color)**, it means those customers haven't purchased for a long time.
+
+    -   These customers might need **win-back campaigns** (e.g., discounts, re-engagement emails).
+
+3.  **Clusters with lower Frequency & Monetary have higher Recency**
+
+    -   Occasional shoppers tend to have **lower transaction counts and spending**, while **frequent buyers** appear in clusters with **higher monetary and frequency values**.
+
+## **Business Application**
+
+✅ **High-value customers (Low Recency, High Frequency & Monetary):**
+
+-   Target with **loyalty programs**, **VIP discounts**, and **exclusive offers**.\
+    ✅ **Occasional buyers (Mid Recency, Mid Frequency & Monetary):**
+
+-   Encourage **repeat purchases** with **personalized promotions** and **email campaigns**.\
+    ✅ **Inactive customers (High Recency, Low Frequency & Monetary):**
+
+-   Implement **win-back campaigns** with **discounts & reactivation offers**.
+
+# Customer Retention & Churn Analysis
+
+In addition to customer segmentation, it's crucial to analyze **customer churn**, i.e., whether certain customers stop purchasing or if their buying frequency decreases. By tracking customer retention trends, businesses can implement targeted marketing strategies to **reduce churn and increase repeat purchases**.
+
+## Calculating Customer Churn Rate
+
+### **Methodology:**
+
+1.  **Calculate the total number of active customers per month** (customers who made at least one purchase in that month).
+
+2.  **Identify repeat customers** (customers who made purchases in consecutive months).
+
+3.  **Compute the churn rate** using the formula:
+
+$$
+Churn Rate=(1−Repeat Customers / Total Customers​)×100
+$$
+
+-   **Repeat Customers**: Customers who purchased both in the current month and the previous month.
+
+-   **Total Customers**: The total number of unique customers in that month.
+
+```{r}
+library(lubridate)
+
+churn_rate <- df_clean %>%
+  mutate(InvoiceMonth = floor_date(InvoiceDate, "month")) %>%
+  group_by(InvoiceMonth) %>%
+  summarise(
+    Total_Customers = n_distinct(`Customer ID`),
+    Repeat_Customers = sum(duplicated(`Customer ID`))
+  ) %>%
+  mutate(Churn_Rate = (1 - Repeat_Customers / Total_Customers) * 100)
+
+ggplot(churn_rate, aes(x = InvoiceMonth, y = Churn_Rate)) +
+  geom_line(color = "red") +
+  labs(title = "Monthly Customer Churn Rate",
+       x = "Month",
+       y = "Churn Rate (%)")
+
+```
+
+## Business Insights:
+
+💡 **Understanding Churn Rate Trends:**
+
+-   If **churn rate increases over time**, it indicates **declining customer retention**, requiring strategic intervention.
+
+-   If **churn rate spikes in specific months**, it may be due to **seasonal trends** (e.g., post-holiday drop in purchases).
+
+-   **Reducing churn is more cost-effective than acquiring new customers**, making retention strategies crucial.
+
+✅ **Business Strategies:**
+
+-   **Win-back campaigns:** Send special offers to customers who haven't purchased in the last 60-90 days.
+
+-   **Customer segmentation-based offers:** Identify high-churn-risk customers and provide personalized discounts.
+
+-   **Automated email marketing:** Trigger email reminders when a customer hasn’t made a purchase for a set period.
+
+# **ROI Analysis of Clustering-Based Marketing**
+
+This code calculates the **Return on Investment (ROI)** for different clustering-based marketing strategies by adjusting the **targeted customer percentage** and **campaign costs per customer**.
+
+**Key Adjustments:**
+
+-   **Targeting only 2%** of total customers instead of 10%, ensuring a **more focused** marketing approach.
+
+-   **Increasing campaign cost per customer** to **\$50-\$60**, reflecting more realistic advertising expenses.
+
+```{r}
+roi_calculation <- function(conversion_rate, avg_spend, campaign_cost, total_customers) {
+  new_revenue <- conversion_rate * avg_spend * total_customers
+  roi <- ((new_revenue - campaign_cost) / campaign_cost) * 100
+  return(roi)
+}
+
+total_customers_kmeans <- nrow(customer_rfm[customer_rfm$Cluster_KMeans == 1, ])
+total_customers_dbscan <- nrow(customer_rfm[customer_rfm$Cluster_DBSCAN == 1, ])
+total_customers_gmm <- nrow(customer_rfm[customer_rfm$Cluster_GMM == 1, ])
+
+
+# Reduce marketing target customers (from 10% to 2%)
+total_targeted_customers_kmeans <- total_customers_kmeans * 0.02
+total_targeted_customers_dbscan <- total_customers_dbscan * 0.02
+total_targeted_customers_gmm <- total_customers_gmm * 0.02
+
+# Increase campaign cost (per customer $50-$60)
+campaign_costs_kmeans <- total_targeted_customers_kmeans * 50
+campaign_costs_dbscan <- total_targeted_customers_dbscan * 60
+campaign_costs_gmm <- total_targeted_customers_gmm * 55
+
+actual_avg_spend <- mean(customer_rfm$Monetary, na.rm = TRUE)
+
+# 计算 ROI
+roi_kmeans <- roi_calculation(0.1, actual_avg_spend, campaign_costs_kmeans, total_targeted_customers_kmeans)
+roi_dbscan <- roi_calculation(0.15, actual_avg_spend, campaign_costs_dbscan, total_targeted_customers_dbscan)
+roi_gmm <- roi_calculation(0.12, actual_avg_spend, campaign_costs_gmm, total_targeted_customers_gmm)
+
+# 输出 ROI 结果
+paste("Final Corrected ROI (K-Means):", round(roi_kmeans, 2), "%")
+paste("Final Corrected ROI (DBSCAN):", round(roi_dbscan, 2), "%")
+paste("Final Corrected ROI (GMM):", round(roi_gmm, 2), "%")
+
+
+```
+
+## **Interpretation of ROI Results**
+
+-   **DBSCAN has the highest ROI (413.57%)**
+
+    -   **Why?** DBSCAN identifies **high-density customer clusters**, meaning it **focuses on the most engaged and valuable customers**.
+
+    -   **Business Insight:** This suggests that **targeting customers in DBSCAN clusters yields the best returns**, as these customers **convert more often and spend more**.
+
+    -   **Marketing Strategy:**
+
+        -   Personalized **loyalty rewards** for these high-value customers.
+
+        -   **Exclusive membership perks** to encourage repeat purchases.
+
+-   **GMM has a strong ROI (348.2%)**
+
+    -   **Why?** GMM allows for **probabilistic customer segmentation**, meaning customers are **assigned weights based on multiple purchasing behaviors**.
+
+    -   **Business Insight:** This means **GMM works well for identifying customers who may convert at a slightly lower but still profitable rate**.
+
+    -   **Marketing Strategy:**
+
+        -   **Predictive pricing models** to maximize profits from high-value segments.
+
+        -   **Automated personalized recommendations** based on their likelihood to purchase.
+
+-   **K-Means has the lowest (but still high) ROI (310.85%)**
+
+    -   **Why?** K-Means provides **general customer groupings**, but may **misclassify certain high-value customers**.
+
+    -   **Business Insight:** The ROI is still strong, indicating that K-Means works **well for large-scale campaigns** but may not be as precise as DBSCAN.
+
+    -   **Marketing Strategy:**
+
+        -   **Broad-based promotions** (e.g., seasonal sales, discount codes).
+
+        -   **Email campaigns for re-engagement of medium-value customers**.
+
+## Key Takeaways
+
+✅ **DBSCAN is the best option for maximizing ROI**, ideal for **targeted high-value customer campaigns**.\
+✅ **GMM performs well for predictive modeling**, useful for **dynamic pricing and customer lifetime value estimation**.\
+✅ **K-Means is suitable for large-scale marketing**, effective for **general promotions and wide audience reach**.
+
+## Business Strategy Recommendations
+
+| Clustering Method | ROI (%) | Best Use Case | Suggested Marketing Strategy |
+|------------------|------------------|------------------|------------------|
+| DBSCAN | 413.57% | High-value customer retention | VIP programs, loyalty rewards, personalized offers |
+| GMM | 348.2% | Predictive modeling | AI-driven pricing, automated recommendations |
+| K-Means | 310.85% | Broad audience targeting | Email marketing, seasonal discounts, large campaigns |
+
+## Final Conclusion
+
+The analysis confirms that **DBSCAN is the most effective clustering approach** for maximizing marketing ROI, making it the preferred method for **targeting high-value customers**. However, **K-Means and GMM still provide solid returns**, each being effective for **different marketing strategies**.
+
+🚀 **Final Business Decision:**
+
+-   Use **DBSCAN for premium customer engagement** (e.g., loyalty programs).
+
+-   Use **GMM for personalized marketing** (e.g., predictive pricing).
+
+-   Use **K-Means for large-scale promotions** (e.g., email & social media ads).
+
+# Time-Series Analysis: Monthly Sales Trend
+
+Understanding **sales trends** over time is essential for business planning.
+
+```{r}
+library(lubridate)
+
+df_clean %>%
+  mutate(InvoiceMonth = floor_date(InvoiceDate, "month")) %>%
+  group_by(InvoiceMonth) %>%
+  summarise(Total_Sales = sum(Total_Spend)) %>%
+  ggplot(aes(x = InvoiceMonth, y = Total_Sales)) +
+  geom_line() +
+  labs(title = "Monthly Sales Trend")
+
+```
+
+💡 **Insights**:
+
+-   Sales **fluctuate seasonally**, peaking in **holiday months**.
+
+-   A declining trend may indicate **customer churn**, requiring targeted marketing efforts.
+
+# Time-Series Forecasting for Sales Prediction
+
+Understanding historical sales trends is useful, but **predicting future sales** allows businesses to **optimize inventory, marketing budgets, and promotional strategies**. Here, we use the **ARIMA (AutoRegressive Integrated Moving Average)** model to forecast future sales.
+
+## **Data Preprocessing**
+
+Before running the forecasting model, we:
+
+1.  **Aggregate transaction data on a monthly basis** by summing total sales.
+
+2.  **Ensure chronological order** for accurate forecasting.
+
+3.  **Convert data into a time-series object (TS)** for forecasting.
+
+## **Applying ARIMA for Sales Forecasting**
+
+ARIMA is a widely used model for **time-series forecasting**, combining:
+
+-   **AutoRegressive (AR)**: Uses past values to predict future trends.
+
+-   **Integrated (I)**: Differencing to make data stationary.
+
+-   **Moving Average (MA)**: Accounts for past errors in predictions.
+
+```{r}
+library(forecast)
+
+# Ensure InvoiceMonth is ordered correctly
+sales_ts_data <- df_clean %>%
+  mutate(InvoiceMonth = floor_date(InvoiceDate, "month")) %>%
+  group_by(InvoiceMonth) %>%
+  summarise(Total_Sales = sum(Total_Spend)) %>%
+  arrange(InvoiceMonth)  # Ensures chronological order
+
+# Convert to time-series object
+sales_ts <- ts(sales_ts_data$Total_Sales, 
+               start = c(year(min(sales_ts_data$InvoiceMonth)), month(min(sales_ts_data$InvoiceMonth))), 
+               frequency = 12)  # 12 represents monthly data
+
+# Fit ARIMA model
+fit <- auto.arima(sales_ts)
+
+# Forecast next 6 months
+forecasted_sales <- forecast(fit, h = 6)
+
+# Visualize the forecast
+autoplot(forecasted_sales) + 
+  labs(title = "6-Month Sales Forecast",
+       x = "Month",
+       y = "Total Sales")
+
+
+```
+
+## Business Insights:
+
+💡 **Why is sales forecasting important?**
+
+-   **Identify future revenue trends**: Determine if sales are expected to increase or decline.
+
+-   **Optimize inventory planning**: If sales are expected to increase, ensure sufficient stock availability.
+
+-   **Adjust marketing strategies**: If lower sales are forecasted for upcoming months, businesses can launch promotions to boost revenue.
+
+✅ **Actionable Business Strategies:**
+
+-   If **sales are forecasted to decline**, consider launching:
+
+    -   **Promotional campaigns**: Limited-time discounts to stimulate demand.
+
+    -   **Email marketing**: Engage previous customers with personalized offers.
+
+-   If **sales are expected to rise**, businesses should:
+
+    -   **Optimize inventory** to prevent stock shortages.
+
+    -   **Increase marketing spend** on high-performing products.
+
+# **Business Insights & Recommendations**
+
+**📌 High-Value Customers (Cluster 1 - KMeans & DBSCAN)**
+
+-   **Marketing Strategy:** Loyalty programs, premium memberships.
+
+-   **Expected ROI:** **High**, due to frequent, high-spend behavior.
+
+**📌 Occasional Buyers (Cluster 2)**
+
+-   **Marketing Strategy:** Discount coupons, targeted ads.
+
+-   **Expected ROI:** **Moderate**, can increase purchase frequency.
+
+**📌 Inactive Customers (Cluster 3)**
+
+-   **Marketing Strategy:** Win-back campaigns, personalized promotions.
+
+-   **Expected ROI:** **Low**, but crucial for reducing churn.
+
+# **Conclusion**
+
+This project successfully demonstrates **customer segmentation** and **sales trend analysis**, providing actionable insights for business strategy.
+
+🚀 **Next Steps**:
+
+-   Integrate **predictive modeling** to forecast **future sales trends**.
+
+-   Deploy results in **BI dashboards** for real-time customer tracking.
+
+-   Optimize **marketing budget allocation** based on cluster insights.
